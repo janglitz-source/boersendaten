@@ -1,0 +1,6 @@
+# Startdatei für den Arbeitsablauf "Global laden".
+# Eine Änderung dieser Datei startet einen Lauf. Die erste Zeile ohne # nennt Arbeitsgang und Region:
+#   Arbeitsgang: auslese | kurse | beides        Region: asien | europa | kanada | usa | alle
+# Die Zeile danach ist nur ein Vermerk, damit sich die Datei ändert.
+beides kanada
+Start 1 am 18.11.2026: erster Test mit der kleinsten Region

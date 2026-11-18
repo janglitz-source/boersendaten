@@ -1,0 +1,125 @@
+# Arbeitsablauf "Global laden": globale Kursdatenbank je Region (Heimatbörsen).
+# Unabhängig vom Ablauf "Kurse laden" (Kernlisten) – fällt dieser hier aus, läuft der Kern weiter.
+name: Global laden
+
+on:
+  schedule:
+    # Tägliche Kurse je Region, jeweils nach Börsenschluss (Zeiten in UTC):
+    - cron: "47 7 * * 1-5"     # Asien/Pazifik  (08:47 Uhr deutscher Winterzeit)
+    - cron: "7 17 * * 1-5"     # Europa         (18:07 Uhr)
+    - cron: "47 21 * * 1-5"    # Kanada         (22:47 Uhr)
+    - cron: "47 0 * * 2-6"     # USA-Zusatzwerte (01:47 Uhr, Dienstag bis Samstag)
+    # Wöchentliche Auslese der handelbaren Werte, samstags verteilt:
+    - cron: "17 9 * * 6"       # Asien/Pazifik
+    - cron: "17 10 * * 6"      # Europa
+    - cron: "17 11 * * 6"      # Kanada
+    - cron: "17 12 * * 6"      # USA-Zusatzwerte
+  push:
+    paths:
+      - "start_global.txt"     # Start durch eine Änderung dieser Datei (so startet Claude einen Lauf)
+  workflow_dispatch:           # Start von Hand
+    inputs:
+      modus:
+        description: "auslese, kurse oder beides"
+        default: "beides"
+      region:
+        description: "asien, europa, kanada, usa oder alle"
+        default: "alle"
+
+permissions:
+  contents: write              # nötig, um die Dateien als Release-Dateien abzulegen
+
+concurrency:
+  group: global-laden          # nie zwei globale Läufe gleichzeitig (schont Yahoo)
+  cancel-in-progress: false
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  ABLAGE: kursdaten-global     # Name der Release-Ablage für die großen Dateien
+
+jobs:
+  laden:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Dateien des Repositorys holen
+        uses: actions/checkout@v4
+
+      - name: Python einrichten
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Bibliotheken installieren (feste Version von yfinance)
+        run: pip install --quiet "yfinance==1.8.0" pandas
+
+      - name: Release-Ablage anlegen, falls sie noch fehlt
+        run: |
+          gh release view "$ABLAGE" >/dev/null 2>&1 || \
+            gh release create "$ABLAGE" --title "Globale Kursdaten" --notes "Automatisch erzeugte Kursdateien je Region. Nicht von Hand ändern."
+
+      - name: Arbeitsgang und Region bestimmen
+        id: plan
+        env:
+          EINGABE_MODUS: ${{ github.event.inputs.modus }}
+          EINGABE_REGION: ${{ github.event.inputs.region }}
+          ZEITPLAN: ${{ github.event.schedule }}
+          EREIGNIS: ${{ github.event_name }}
+        run: |
+          MODUS="$EINGABE_MODUS"; REGION="$EINGABE_REGION"
+          # Start über die Startdatei: erste Zeile ohne # nennt Arbeitsgang und Region
+          if [ "$EREIGNIS" = "push" ]; then
+            ZEILE=$(grep -v '^#' start_global.txt | head -1)
+            MODUS=$(echo "$ZEILE" | awk '{print $1}'); REGION=$(echo "$ZEILE" | awk '{print $2}')
+          fi
+          case "$ZEITPLAN" in
+            "47 7 * * 1-5")  MODUS=kurse;   REGION=asien ;;
+            "7 17 * * 1-5")  MODUS=kurse;   REGION=europa ;;
+            "47 21 * * 1-5") MODUS=kurse;   REGION=kanada ;;
+            "47 0 * * 2-6")  MODUS=kurse;   REGION=usa ;;
+            "17 9 * * 6")    MODUS=auslese; REGION=asien ;;
+            "17 10 * * 6")   MODUS=auslese; REGION=europa ;;
+            "17 11 * * 6")   MODUS=auslese; REGION=kanada ;;
+            "17 12 * * 6")   MODUS=auslese; REGION=usa ;;
+          esac
+          MODUS="${MODUS:-beides}"; REGION="${REGION:-alle}"
+          # nur bekannte Werte zulassen
+          case "$MODUS" in auslese|kurse|beides) ;; *) echo "Unbekannter Arbeitsgang: $MODUS"; exit 1 ;; esac
+          case "$REGION" in asien|europa|kanada|usa|alle) ;; *) echo "Unbekannte Region: $REGION"; exit 1 ;; esac
+          if [ "$REGION" = "alle" ]; then REGION="asien europa kanada usa"; fi
+          echo "modus=$MODUS" >> "$GITHUB_OUTPUT"; echo "regionen=$REGION" >> "$GITHUB_OUTPUT"
+          echo "Arbeitsgang: $MODUS · Regionen: $REGION"
+
+      # Jede Region wird für sich bearbeitet und sofort abgelegt. Scheitert eine Region,
+      # laufen die übrigen weiter; am Ende meldet der Ablauf den Fehler.
+      - name: Laden und ablegen
+        env:
+          MODUS: ${{ steps.plan.outputs.modus }}
+          REGIONEN: ${{ steps.plan.outputs.regionen }}
+        run: |
+          FEHLER=0
+          for REGION in $REGIONEN; do
+            rm -rf out && mkdir -p out
+            if [ "$MODUS" != "kurse" ]; then
+              echo "::group::Auslese $REGION"
+              if python global_laden.py --modus auslese --region "$REGION" --out out; then
+                gh release upload "$ABLAGE" out/aktiv_$REGION.csv out/auslese_$REGION.json --clobber
+              else
+                echo "Auslese $REGION gescheitert – die alte Liste bleibt stehen."; FEHLER=1
+              fi
+              echo "::endgroup::"
+            fi
+            if [ "$MODUS" != "auslese" ]; then
+              echo "::group::Kurse $REGION"
+              # aktuelle Liste der aktiven Werte aus der Ablage holen (fehlt sie, lädt das Skript alle Kandidaten)
+              [ -f out/aktiv_$REGION.csv ] || gh release download "$ABLAGE" -p "aktiv_$REGION.csv" -D out 2>/dev/null || true
+              if python global_laden.py --modus kurse --region "$REGION" --out out --aktiv out/aktiv_$REGION.csv; then
+                gh release upload "$ABLAGE" out/kurse_$REGION.csv.gz out/kennzahlen_$REGION.csv out/status_$REGION.json --clobber
+              else
+                echo "Kurse $REGION gescheitert – der alte Stand bleibt stehen."; FEHLER=1
+              fi
+              echo "::endgroup::"
+            fi
+            sleep 60    # Pause zwischen zwei Regionen
+          done
+          exit $FEHLER

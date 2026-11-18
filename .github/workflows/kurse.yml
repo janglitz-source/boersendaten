@@ -30,7 +30,7 @@ jobs:
           python-version: "3.12"
 
       - name: Bibliotheken installieren
-        run: pip install --quiet yfinance pandas
+        run: pip install --quiet "yfinance==1.8.0" pandas   # feste Version, die am 18.11.2026 geprüft wurde
 
       - name: Kurse laden und Kennzahlen rechnen
         run: python kurse_laden.py --tickers tickers.csv --out out
