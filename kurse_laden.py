@@ -5,7 +5,7 @@ kurse_laden.py – lädt Tageskurse für Jans Papierdepot und legt sie als Datei
 
 Was das Skript macht:
   1. Es liest die Tickerliste aus tickers.csv (Spalten: ticker, gruppe).
-  2. Es lädt für jeden Wert die Tageskurse der letzten zwei Jahre von Yahoo Finance
+  2. Es lädt für jeden Wert die Tageskurse der letzten fünf Jahre von Yahoo Finance
      (über die Bibliothek yfinance): Eröffnung, Hoch, Tief, Schluss, Umsatz in Stück.
      Die Kurse sind um Aktiensplits bereinigt, aber NICHT um Dividenden – so passen
      sie zu den Kursen im Chart und zu den Vergleichskursen von ariva.
@@ -17,7 +17,8 @@ Was das Skript macht:
         kennzahlen.csv    eine Zeile je Wert mit den Kennzahlen
         letzte_kurse.csv  eine Zeile je Wert: letzter Handelstag und Schlusskurs
         status.json       Stand der Daten (letzter Handelstag, Anzahl, fehlende Werte)
-  6. Sind weniger als 90 % der Aktien aktuell, endet das Skript mit einem Fehler.
+  6. Sind weniger als 90 % der Listenwerte (Watchlist und Midcaps) aktuell, endet das
+     Skript mit einem Fehler.
      Dann veröffentlicht der Arbeitsablauf nichts, und der alte Stand bleibt stehen.
 
 Aufruf:  python kurse_laden.py --tickers tickers.csv --out out
@@ -37,11 +38,13 @@ import pandas as pd
 # ----------------------------------------------------------------------------
 # Einstellungen
 # ----------------------------------------------------------------------------
-ZEITRAUM = "2y"          # so viel Kurshistorie wird geladen (rund 500 Handelstage)
+ZEITRAUM = "5y"          # so viel Kurshistorie wird geladen (rund 1.250 Handelstage,
+                         # genug für 60 Monatskerzen in der Chartanalyse)
 BLOCKGROESSE = 50        # so viele Werte je Abruf bei Yahoo
 PAUSE_SEKUNDEN = 3       # Pause zwischen zwei Blöcken (schont die Quelle)
 VERSUCHE = 3             # so oft wird ein gescheiterter Block wiederholt
-MINDESTANTEIL = 0.90     # mindestens so viele Aktien müssen aktuell sein
+MINDESTANTEIL = 0.90     # mindestens so viele Listenwerte müssen aktuell sein
+KERNGRUPPEN = ("Watchlist", "Midcaps")   # Listen des Papierdepots; nur sie zählen für den Abbruch
 SPALTEN = ["open", "high", "low", "close", "volume"]
 
 
@@ -267,6 +270,7 @@ def schreibe_dateien(kurse, tickers, bezugstag, ausgabe, quelle):
     os.makedirs(ausgabe, exist_ok=True)
 
     aktuell, veraltet, fehlend = [], [], []
+    zusatz_aktuell = 0       # aktuelle Werte außerhalb von Watchlist und Midcaps (z. B. Gruppe SP500)
     kennzahlen = []
 
     with gzip.open(os.path.join(ausgabe, "kurse.csv.gz"), "wt", encoding="utf-8", newline="") as f:
@@ -277,18 +281,19 @@ def schreibe_dateien(kurse, tickers, bezugstag, ausgabe, quelle):
             if tabelle is None or tabelle.empty:
                 fehlend.append(ticker)
                 continue
-            for datum, zeile in tabelle.iterrows():
-                menge = int(zeile["volume"]) if pd.notna(zeile["volume"]) else 0
-                schreiber.writerow([
-                    datum.strftime("%Y-%m-%d"), ticker,
-                    round(float(zeile["open"]), 4), round(float(zeile["high"]), 4),
-                    round(float(zeile["low"]), 4), round(float(zeile["close"]), 4), menge,
-                ])
+            # Alle Zeilen des Werts in einem Rutsch schreiben (schnell, auch bei 1.250 Tagen)
+            block = tabelle[["open", "high", "low", "close"]].astype(float).round(4)
+            block.insert(0, "ticker", ticker)
+            block.insert(0, "datum", tabelle.index.strftime("%Y-%m-%d"))
+            block["volume"] = tabelle["volume"].fillna(0).astype("int64")
+            block.to_csv(f, header=False, index=False, lineterminator="\n")
             eintrag = {"ticker": ticker, "gruppe": gruppe}
             eintrag.update(kennzahlen_fuer(tabelle))
             kennzahlen.append(eintrag)
             if gruppe != "Markt":
                 (aktuell if tabelle.index[-1] == bezugstag else veraltet).append(ticker)
+                if gruppe not in KERNGRUPPEN and tabelle.index[-1] == bezugstag:
+                    zusatz_aktuell += 1
 
     if kennzahlen:
         felder = list(kennzahlen[0].keys())
@@ -302,15 +307,19 @@ def schreibe_dateien(kurse, tickers, bezugstag, ausgabe, quelle):
             for eintrag in kennzahlen:
                 schreiber.writerow([eintrag["ticker"], eintrag["gruppe"], eintrag["datum"], eintrag["close"]])
 
-    aktien = [t for t, g in tickers if g != "Markt"]
+    kern = [t for t, g in tickers if g in KERNGRUPPEN]
+    zusatz = [t for t, g in tickers if g != "Markt" and g not in KERNGRUPPEN]
     status = {
         "erstellt_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
         "letzter_handelstag": bezugstag.strftime("%Y-%m-%d") if bezugstag is not None else None,
-        "aktien_gesamt": len(aktien),
-        "aktien_aktuell": len(aktuell),
+        "aktien_gesamt": len(kern),                           # Watchlist und Midcaps
+        "aktien_aktuell": len(aktuell) - zusatz_aktuell,
+        "zusatz_gesamt": len(zusatz),                         # übrige Aktien (z. B. Gruppe SP500)
+        "zusatz_aktuell": zusatz_aktuell,
         "aktien_veraltet": sorted(veraltet),
         "fehlend": sorted(fehlend),
         "werte_in_datei": len(kennzahlen),
+        "zeitraum": ZEITRAUM,
         "quelle": quelle,
         "hinweis": "Kurse um Splits bereinigt, nicht um Dividenden. RSI und ATR nach Wilder.",
     }
@@ -345,7 +354,7 @@ def main(argumente=None, lader=lade_block, jetzt_utc=None):
     status = schreibe_dateien(kurse, tickers, bezugstag, optionen.out, quelle)
     print(json.dumps({k: v for k, v in status.items() if k != "hinweis"}, ensure_ascii=False), flush=True)
 
-    # Abbruch, wenn zu wenige Aktien aktuell sind – dann wird nichts veröffentlicht.
+    # Abbruch, wenn zu wenige Listenwerte aktuell sind – dann wird nichts veröffentlicht.
     if status["aktien_gesamt"] == 0 or status["aktien_aktuell"] < MINDESTANTEIL * status["aktien_gesamt"]:
         print("FEHLER: zu wenige aktuelle Werte – Daten werden nicht veröffentlicht.", flush=True)
         return 1
