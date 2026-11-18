@@ -1,0 +1,14 @@
+{
+  "erstellt_utc": "2026-11-18 19:55",
+  "letzter_handelstag": "2026-11-17",
+  "aktien_gesamt": 614,
+  "aktien_aktuell": 612,
+  "aktien_veraltet": [
+    "NWE",
+    "ROKU"
+  ],
+  "fehlend": [],
+  "werte_in_datei": 646,
+  "quelle": "Yahoo Finance über yfinance 1.8.0",
+  "hinweis": "Kurse um Splits bereinigt, nicht um Dividenden. RSI und ATR nach Wilder."
+}
