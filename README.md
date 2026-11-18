@@ -1,0 +1,2 @@
+# boersendaten
+totalreturn
