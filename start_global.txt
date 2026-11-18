@@ -2,5 +2,5 @@
 # Eine Änderung dieser Datei startet einen Lauf. Die erste Zeile ohne # nennt Arbeitsgang und Region:
 #   Arbeitsgang: auslese | kurse | beides        Region: asien | europa | kanada | usa | alle
 # Die Zeile danach ist nur ein Vermerk, damit sich die Datei ändert.
-beides kanada
-Start 1 am 18.11.2026: erster Test mit der kleinsten Region
+beides alle
+Start 2 am 18.11.2026: erste Auslese und erste Kurse für alle Regionen (Test mit Kanada war erfolgreich)
