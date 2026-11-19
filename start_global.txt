@@ -1,6 +1,7 @@
 # Startdatei für den Arbeitsablauf "Global laden".
 # Eine Änderung dieser Datei startet einen Lauf. Die erste Zeile ohne # nennt Arbeitsgang und Region:
 #   Arbeitsgang: auslese | kurse | beides        Region: asien | europa | kanada | usa | alle
+#   Drittes Wort "voll" (z. B. "kurse europa voll"): Bestand nicht nutzen, alles voll laden – nur zur Reparatur.
 # Die Zeile danach ist nur ein Vermerk, damit sich die Datei ändert.
-kurse usa
-Start 4 am 19.11.2026: Kurse USA-Zusatzwerte nachholen (dem Nachtlauf fehlte bei den meisten Werten der 18.11.)
+kurse alle
+Start 5 am 19.11.2026: erster Lauf mit fortlaufendem Laden für alle Regionen
