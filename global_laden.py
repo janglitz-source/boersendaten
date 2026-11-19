@@ -212,6 +212,7 @@ def auslese(region, universum, ausgabe, lader=None, jetzt_utc=None, vorher=None)
         schreiber = csv.DictWriter(f, fieldnames=felder, extrasaction="ignore")
         schreiber.writeheader(); schreiber.writerows(aktiv)
     bericht = {"region": region, "erstellt_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+               "erstellt_berlin": datetime.now(ZoneInfo("Europe/Berlin")).strftime("%Y-%m-%d %H:%M"),
                "kandidaten": len(kandidaten), "aktiv": len(aktiv), "ausgeschieden": gruende,
                "aus_bestand_beurteilt": aus_bestand, "bei_yahoo_geladen": len(rest),
                "schwellen": {"umsatz_mio_eur": MIN_UMSATZ_MIO_EUR, "kurs_eur": MIN_KURS_EUR}, "wechselkurse": fx}
@@ -284,6 +285,8 @@ def kurse_region(region, liste, ausgabe, lader=None, jetzt_utc=None, vorher=None
 
     erwartet = erwarteter_handelstag(region, jetzt_utc)
     status = {"region": region, "erstellt_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+              # dieselbe Zeit in deutscher Zeit (MEZ/MESZ) – diese Angabe gehört in Berichte und in den Tracker
+              "erstellt_berlin": datetime.now(ZoneInfo("Europe/Berlin")).strftime("%Y-%m-%d %H:%M"),
               "letzter_handelstag": bezugstag.strftime("%Y-%m-%d") if bezugstag is not None else None,
               # Prüfung für alle, die die Daten nutzen: Steht der erwartete Tag in den Daten?
               "erwarteter_handelstag": erwartet.strftime("%Y-%m-%d"),

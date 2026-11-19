@@ -468,6 +468,8 @@ def schreibe_dateien(kurse, tickers, bezugstag, ausgabe, quelle, abruf=None, erw
     zusatz = [t for t, g in tickers if g != "Markt" and g not in KERNGRUPPEN]
     status = {
         "erstellt_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+        # dieselbe Zeit in deutscher Zeit (MEZ/MESZ) – diese Angabe gehört in Berichte und in den Tracker
+        "erstellt_berlin": datetime.now(ZoneInfo("Europe/Berlin")).strftime("%Y-%m-%d %H:%M"),
         "letzter_handelstag": bezugstag.strftime("%Y-%m-%d") if bezugstag is not None else None,
         # Prüfung: Steht der erwartete US-Handelstag in den Daten? (false: US-Feiertag oder Lücke bei Yahoo)
         "erwarteter_handelstag": erwartet.strftime("%Y-%m-%d") if erwartet is not None else None,
