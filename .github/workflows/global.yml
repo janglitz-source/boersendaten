@@ -8,7 +8,10 @@ on:
     - cron: "47 7 * * 1-5"     # Asien/Pazifik  (08:47 Uhr deutscher Winterzeit)
     - cron: "7 17 * * 1-5"     # Europa         (18:07 Uhr)
     - cron: "47 21 * * 1-5"    # Kanada         (22:47 Uhr)
-    - cron: "47 0 * * 2-6"     # USA-Zusatzwerte (01:47 Uhr, Dienstag bis Samstag)
+    # USA-Zusatzwerte: bewusst am Abend kurz nach Börsenschluss. Beim Lauf um 3 Uhr nachts
+    # (19.11.2026) ließ Yahoo bei den meisten Werten die jüngste Tageskerze weg; abends
+    # um 22:30 und 0:25 Uhr war sie vollständig da.
+    - cron: "7 22 * * 1-5"     # USA-Zusatzwerte (23:07 Uhr)
     # Wöchentliche Auslese der handelbaren Werte, samstags verteilt:
     - cron: "17 9 * * 6"       # Asien/Pazifik
     - cron: "17 10 * * 6"      # Europa
@@ -76,7 +79,7 @@ jobs:
             "47 7 * * 1-5")  MODUS=kurse;   REGION=asien ;;
             "7 17 * * 1-5")  MODUS=kurse;   REGION=europa ;;
             "47 21 * * 1-5") MODUS=kurse;   REGION=kanada ;;
-            "47 0 * * 2-6")  MODUS=kurse;   REGION=usa ;;
+            "7 22 * * 1-5")  MODUS=kurse;   REGION=usa ;;
             "17 9 * * 6")    MODUS=auslese; REGION=asien ;;
             "17 10 * * 6")   MODUS=auslese; REGION=europa ;;
             "17 11 * * 6")   MODUS=auslese; REGION=kanada ;;
@@ -113,7 +116,11 @@ jobs:
               echo "::group::Kurse $REGION"
               # aktuelle Liste der aktiven Werte aus der Ablage holen (fehlt sie, lädt das Skript alle Kandidaten)
               [ -f out/aktiv_$REGION.csv ] || gh release download "$ABLAGE" -p "aktiv_$REGION.csv" -D out 2>/dev/null || true
-              if python global_laden.py --modus kurse --region "$REGION" --out out --aktiv out/aktiv_$REGION.csv; then
+              # Kursdatei des vorigen Laufs holen: Lässt Yahoo einen Tag weg, den der letzte Lauf
+              # schon hatte, übernimmt das Skript ihn von dort (fehlt die Datei, läuft es ohne).
+              rm -rf vorher && mkdir -p vorher
+              gh release download "$ABLAGE" -p "kurse_$REGION.csv.gz" -D vorher 2>/dev/null || true
+              if python global_laden.py --modus kurse --region "$REGION" --out out --aktiv out/aktiv_$REGION.csv --vorher vorher/kurse_$REGION.csv.gz; then
                 gh release upload "$ABLAGE" out/kurse_$REGION.csv.gz out/kennzahlen_$REGION.csv out/status_$REGION.json --clobber
               else
                 echo "Kurse $REGION gescheitert – der alte Stand bleibt stehen."; FEHLER=1

@@ -2,5 +2,5 @@
 # Eine Änderung dieser Datei startet einen Lauf. Die erste Zeile ohne # nennt Arbeitsgang und Region:
 #   Arbeitsgang: auslese | kurse | beides        Region: asien | europa | kanada | usa | alle
 # Die Zeile danach ist nur ein Vermerk, damit sich die Datei ändert.
-beides alle
-Start 2 am 18.11.2026: erste Auslese und erste Kurse für alle Regionen (Test mit Kanada war erfolgreich)
+kurse asien
+Start 3 am 19.11.2026: Kurse Asien/Pazifik nach Tokioter Börsenschluss, erster Lauf mit Schutz vor Yahoo-Lücken

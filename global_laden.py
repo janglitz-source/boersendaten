@@ -20,12 +20,17 @@ dessen Dateien nicht an. Es kennt zwei Arbeitsgänge:
         kurse_<region>.csv.gz      datum,ticker,open,high,low,close,volume (Heimatwährung)
         kennzahlen_<region>.csv    eine Zeile je Wert, mit Name, Land, Sektor, ISIN, Umsatz in €
         status_<region>.json       Stand der Daten
+      Schutz vor Lücken bei Yahoo: Mit --vorher bekommt das Skript die Kursdatei des letzten
+      Laufs. Liefert Yahoo einen Handelstag nicht mehr, den der letzte Lauf schon hatte, wird
+      dieser Tag aus der alten Datei übernommen. Die Statusdatei nennt außerdem den erwarteten
+      letzten Handelstag und sagt mit "stand_aktuell", ob die Daten diesen Tag enthalten.
 
 Regionen:  asien (Japan, Australien, Neuseeland) · europa · kanada · usa (Zusatzwerte)
 
 Aufruf:
   python global_laden.py --modus auslese --region europa --out out
-  python global_laden.py --modus kurse   --region europa --out out --aktiv out/aktiv_europa.csv
+  python global_laden.py --modus kurse   --region europa --out out --aktiv out/aktiv_europa.csv \
+                         --vorher vorher/kurse_europa.csv.gz
 """
 
 import argparse
@@ -35,7 +40,7 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, time as uhrzeit, timezone
+from datetime import datetime, time as uhrzeit, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -52,6 +57,8 @@ MIN_TAGE_AUSLESE = 40        # so viele Handelstage muss ein Wert in drei Monate
 MAX_ALTER_TAGE = 7           # der letzte Kurs darf höchstens so viele Tage alt sein
 BLOCK = 50                   # Werte je Abruf
 PAUSE = 4                    # Sekunden Pause zwischen zwei Blöcken (schont Yahoo)
+VORLAUF_TAGE = 15            # so viele Kalendertage der alten Kursdatei werden zum Abgleich gelesen
+VORLAUF_TOLERANZ = 0.005     # alte und neue Reihe müssen am letzten gemeinsamen Tag auf 0,5 % übereinstimmen
 
 # Wechselkurse bei Yahoo: 1 Euro = x Einheiten der Währung
 FX_SYMBOLE = {
@@ -68,6 +75,9 @@ SCHLUSS = {
     "": ("America/New_York", uhrzeit(16, 20)),
 }
 SCHLUSS_EUROPA = ("Europe/Berlin", uhrzeit(18, 0))   # alle übrigen europäischen Börsen
+
+# Leitbörse je Region: an ihr wird gemessen, welcher Handelstag in den Daten stehen müsste.
+LEITBOERSE = {"asien": ".T", "europa": ".DE", "kanada": ".TO", "usa": ""}
 
 
 # ----------------------------------------------------------------------------
@@ -125,6 +135,59 @@ def entferne_unfertige_tage(kurse, jetzt_utc=None):
     return kurse
 
 
+def erwarteter_handelstag(region, jetzt_utc=None):
+    """Letzter Wochentag, an dem die Leitbörse der Region schon geschlossen hat.
+    Feiertage kennt die Funktion nicht – an und nach Feiertagen nennt sie einen Tag zu viel."""
+    jetzt_utc = jetzt_utc or datetime.now(timezone.utc)
+    zone, schluss = SCHLUSS.get(LEITBOERSE[region], SCHLUSS_EUROPA)
+    ort = jetzt_utc.astimezone(ZoneInfo(zone))
+    tag = ort.date()
+    if ort.weekday() >= 5 or ort.time() < schluss:   # Wochenende oder Börse noch offen: einen Tag zurück
+        tag -= timedelta(days=1)
+    while tag.weekday() >= 5:                        # Samstag/Sonntag überspringen
+        tag -= timedelta(days=1)
+    return pd.Timestamp(tag)
+
+
+def lies_vorlauf(pfad, jetzt_utc=None):
+    """Liest die letzten Tage der Kursdatei des vorigen Laufs. Gibt {symbol: Tabelle} zurück,
+    leer, wenn die Datei fehlt oder nicht lesbar ist (dann läuft alles wie ohne Vorlauf)."""
+    if not pfad or not os.path.exists(pfad):
+        return {}
+    try:
+        alt = pd.read_csv(pfad, parse_dates=["datum"])
+    except Exception as fehler:
+        print(f"Vorlauf nicht lesbar: {fehler}", flush=True)
+        return {}
+    grenze = pd.Timestamp((jetzt_utc or datetime.now(timezone.utc)).date()) - pd.Timedelta(days=VORLAUF_TAGE)
+    alt = alt[alt["datum"] >= grenze]
+    return {symbol: teil.set_index("datum")[kern.SPALTEN].sort_index() for symbol, teil in alt.groupby("ticker")}
+
+
+def ergaenze_aus_vorlauf(kurse, vorlauf):
+    """Übernimmt Handelstage aus dem vorigen Lauf, die Yahoo jetzt nicht mehr liefert.
+    Hintergrund: Yahoo lässt die jüngste Tageskerze zu manchen Uhrzeiten wieder weg
+    (beobachtet am 19.11.2026 bei US-Werten um 3 Uhr deutscher Zeit).
+    Übernommen wird nur, wenn alte und neue Reihe am letzten gemeinsamen Tag übereinstimmen –
+    sonst liegt ein Split oder eine Korrektur dazwischen und die alten Zeilen passen nicht mehr.
+    Gibt (kurse, Zahl der ergänzten Werte) zurück."""
+    ergaenzt = 0
+    for symbol, neu in list(kurse.items()):
+        alt = vorlauf.get(symbol)
+        if alt is None or neu.empty:
+            continue
+        letzter = neu.index[-1]
+        mehr = alt[alt.index > letzter]
+        if mehr.empty or letzter not in alt.index:
+            continue
+        a, n = float(alt.loc[letzter, "close"]), float(neu["close"].iloc[-1])
+        if n <= 0 or abs(a / n - 1) > VORLAUF_TOLERANZ:
+            continue
+        kurse[symbol] = pd.concat([neu, mehr.astype(neu.dtypes.to_dict(), errors="ignore")])
+        ergaenzt += 1
+    return kurse, ergaenzt
+
+
 # ----------------------------------------------------------------------------
 # Arbeitsgang 1: wöchentliche Auslese
 # ----------------------------------------------------------------------------
@@ -175,11 +238,16 @@ def auslese(region, universum, ausgabe, lader=None, jetzt_utc=None):
 # ----------------------------------------------------------------------------
 # Arbeitsgang 2: tägliche Kurse und Kennzahlen
 # ----------------------------------------------------------------------------
-def kurse_region(region, liste, ausgabe, lader=None, jetzt_utc=None):
+def kurse_region(region, liste, ausgabe, lader=None, jetzt_utc=None, vorher=None):
     werte = lies_universum(liste, region)
     print(f"Kurse {region}: {len(werte)} Werte", flush=True)
     fx = wechselkurse(lader)
     kurse = lade([w["symbol"] for w in werte], "5y", lader=lader)
+    # Tage, die Yahoo jetzt weglässt, aus dem vorigen Lauf übernehmen – danach erst
+    # die unfertigen Tageskerzen entfernen (die Regel gilt so auch für übernommene Zeilen).
+    kurse, ergaenzt = ergaenze_aus_vorlauf(kurse, lies_vorlauf(vorher, jetzt_utc))
+    if ergaenzt:
+        print(f"Aus dem vorigen Lauf ergänzt: {ergaenzt} Werte", flush=True)
     kurse = entferne_unfertige_tage(kurse, jetzt_utc)
 
     letzte = [t.index[-1] for t in kurse.values() if not t.empty]
@@ -219,13 +287,20 @@ def kurse_region(region, liste, ausgabe, lader=None, jetzt_utc=None):
             schreiber = csv.DictWriter(f, fieldnames=list(kennzahlen[0].keys()))
             schreiber.writeheader(); schreiber.writerows(kennzahlen)
 
+    erwartet = erwarteter_handelstag(region, jetzt_utc)
     status = {"region": region, "erstellt_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
               "letzter_handelstag": bezugstag.strftime("%Y-%m-%d") if bezugstag is not None else None,
+              # Prüfung für alle, die die Daten nutzen: Steht der erwartete Tag in den Daten?
+              "erwarteter_handelstag": erwartet.strftime("%Y-%m-%d"),
+              "stand_aktuell": bool(bezugstag is not None and bezugstag >= erwartet),
+              "aus_vorlauf_ergaenzt": ergaenzt,
               "werte_gesamt": len(werte), "werte_aktuell": aktuell, "werte_veraltet": len(veraltet),
               "veraltet_beispiele": sorted(veraltet)[:40], "fehlend": len(fehlend), "fehlend_beispiele": sorted(fehlend)[:40],
               "wechselkurse": fx, "quelle": "Yahoo Finance über yfinance",
               "hinweis": "Kurse in Heimatwährung (London in Pence), um Splits bereinigt, nicht um Dividenden. "
-                         "Feiertage einzelner Länder führen zu einzelnen veralteten Werten."}
+                         "Feiertage einzelner Länder führen zu einzelnen veralteten Werten. "
+                         "stand_aktuell = false heißt: Der erwartete Handelstag fehlt (Feiertag der Leitbörse "
+                         "oder Lücke bei Yahoo) – Daten dann nur mit Gegenprobe verwenden."}
     with open(os.path.join(ausgabe, f"status_{region}.json"), "w", encoding="utf-8") as f:
         json.dump(status, f, ensure_ascii=False, indent=2)
     print(json.dumps({k: v for k, v in status.items() if k not in ("hinweis", "wechselkurse")}, ensure_ascii=False), flush=True)
@@ -242,6 +317,7 @@ def main(argumente=None, lader=None, jetzt_utc=None):
     p.add_argument("--region", choices=REGIONEN, required=True)
     p.add_argument("--universum", default="universum_global.csv", help="Kandidatenliste (für die Auslese)")
     p.add_argument("--aktiv", default=None, help="Liste der aktiven Werte (für die Kurse); fehlt sie, gilt die Kandidatenliste")
+    p.add_argument("--vorher", default=None, help="Kursdatei des vorigen Laufs (schützt vor Lücken bei Yahoo)")
     p.add_argument("--out", default="out", help="Ausgabeordner")
     o = p.parse_args(argumente)
     if o.modus == "auslese":
@@ -249,7 +325,7 @@ def main(argumente=None, lader=None, jetzt_utc=None):
     liste = o.aktiv if o.aktiv and os.path.exists(o.aktiv) else o.universum
     if liste == o.universum:
         print("Hinweis: keine Auslese vorhanden – lade die ganze Kandidatenliste der Region.", flush=True)
-    return kurse_region(o.region, liste, o.out, lader=lader, jetzt_utc=jetzt_utc)
+    return kurse_region(o.region, liste, o.out, lader=lader, jetzt_utc=jetzt_utc, vorher=o.vorher)
 
 
 if __name__ == "__main__":
