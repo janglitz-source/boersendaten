@@ -3,5 +3,5 @@
 #   Arbeitsgang: auslese | kurse | beides        Region: asien | europa | kanada | usa | alle
 #   Drittes Wort "voll" (z. B. "kurse europa voll"): Bestand nicht nutzen, alles voll laden – nur zur Reparatur.
 # Die Zeile danach ist nur ein Vermerk, damit sich die Datei ändert.
-kurse alle
-Start 5 am 19.11.2026: erster Lauf mit fortlaufendem Laden für alle Regionen
+auslese kanada
+Start 6 am 19.11.2026: Probe der Auslese mit Bestand (Kanada)
