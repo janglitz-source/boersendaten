@@ -7,30 +7,36 @@ Das Skript ergänzt kurse_laden.py (Kernlisten Watchlist, Midcaps, S&P 500) und 
 dessen Dateien nicht an. Es kennt zwei Arbeitsgänge:
 
   auslese  (einmal pro Woche je Region)
-      Lädt für ALLE Kandidaten der Region aus universum_global.csv die Tageskurse der
-      letzten drei Monate und behält nur handelbare Werte:
+      Prüft für ALLE Kandidaten der Region aus universum_global.csv, ob sie handelbar sind:
         - Ø-Tagesumsatz der letzten 20 Tage mindestens 1 Mio. € (an der Heimatbörse)
         - Kurs-Gegenwert mindestens 1 €
         - Kurse aktuell (letzter Kurs höchstens 7 Tage alt), mindestens 40 Handelstage
+      Für Werte, die schon im Bestand stehen (Kursdatei des vorigen Laufs, --vorher), rechnet
+      das Skript aus dem Bestand und lädt nichts. Nur für die übrigen Kandidaten holt es
+      drei Monate Kurse bei Yahoo.
       Ergebnis: aktiv_<region>.csv – nur diese Werte werden täglich geladen.
 
   kurse    (täglich je Region, nach Börsenschluss)
-      Lädt für die aktiven Werte der Region fünf Jahre Tageskurse, entfernt unfertige
-      Tageskerzen, rechnet die Kennzahlen (wie in der Kerndatenbank) und schreibt:
+      Führt für die aktiven Werte der Region fünf Jahre Tageskurse. FORTLAUFEND: Mit --vorher
+      holt das Skript bei Yahoo nur den letzten Monat und hängt die neuen Tage an den Bestand
+      an. Voll nachgeladen (fünf Jahre) wird nur gezielt ein einzelner Wert: wenn er neu ist
+      oder weniger als 250 Handelstage Bestand hat, wenn Bestand und neuer Abruf nicht zusammenpassen (Split, Korrektur, lange Pause) oder
+      wenn der letzte Tag einen Kurssprung von mehr als 40 % zeigt. LÜCKENREGEL: Lässt Yahoo
+      den jüngsten Tag weg, den der Bestand schon hat, bleibt er aus dem Bestand erhalten.
+      (Die Regeln stehen in kurse_laden.py, Abschnitt 2b – beide Datenbanken nutzen denselben Code.)
+      Danach entfernt das Skript unfertige Tageskerzen, rechnet die Kennzahlen und schreibt:
         kurse_<region>.csv.gz      datum,ticker,open,high,low,close,volume (Heimatwährung)
         kennzahlen_<region>.csv    eine Zeile je Wert, mit Name, Land, Sektor, ISIN, Umsatz in €
-        status_<region>.json       Stand der Daten
-      Schutz vor Lücken bei Yahoo: Mit --vorher bekommt das Skript die Kursdatei des letzten
-      Laufs. Liefert Yahoo einen Handelstag nicht mehr, den der letzte Lauf schon hatte, wird
-      dieser Tag aus der alten Datei übernommen. Die Statusdatei nennt außerdem den erwarteten
-      letzten Handelstag und sagt mit "stand_aktuell", ob die Daten diesen Tag enthalten.
+        status_<region>.json       Stand der Daten: letzter und erwarteter Handelstag,
+                                   "stand_aktuell" und im Feld "abruf", wie geladen wurde
 
 Regionen:  asien (Japan, Australien, Neuseeland) · europa · kanada · usa (Zusatzwerte)
 
 Aufruf:
-  python global_laden.py --modus auslese --region europa --out out
+  python global_laden.py --modus auslese --region europa --out out --vorher vorher/kurse_europa.csv.gz
   python global_laden.py --modus kurse   --region europa --out out --aktiv out/aktiv_europa.csv \
                          --vorher vorher/kurse_europa.csv.gz
+  Zusatz --voll: Bestand nicht nutzen, alles voll laden (nur zur Reparatur).
 """
 
 import argparse
@@ -57,8 +63,7 @@ MIN_TAGE_AUSLESE = 40        # so viele Handelstage muss ein Wert in drei Monate
 MAX_ALTER_TAGE = 7           # der letzte Kurs darf höchstens so viele Tage alt sein
 BLOCK = 50                   # Werte je Abruf
 PAUSE = 4                    # Sekunden Pause zwischen zwei Blöcken (schont Yahoo)
-VORLAUF_TAGE = 15            # so viele Kalendertage der alten Kursdatei werden zum Abgleich gelesen
-VORLAUF_TOLERANZ = 0.005     # alte und neue Reihe müssen am letzten gemeinsamen Tag auf 0,5 % übereinstimmen
+TAGE_AUSLESE = 70            # so viele letzte Handelstage aus dem Bestand nimmt die Auslese (rund drei Monate)
 
 # Wechselkurse bei Yahoo: 1 Euro = x Einheiten der Währung
 FX_SYMBOLE = {
@@ -100,6 +105,15 @@ def lade(symbole, zeitraum, lader=None):
     kern.BLOCKGROESSE = BLOCK
     kern.PAUSE_SEKUNDEN = PAUSE
     return kern.lade_alle(symbole, lader=lader or kern.lade_block)
+
+
+def lade_mit_bestand(symbole, bestand, lader=None, jetzt_utc=None):
+    """Fortlaufendes Laden über das Kernskript: mit Bestand nur der letzte Monat,
+    volles Nachladen nur gezielt. Gibt (kurse, bericht) zurück."""
+    kern.ZEITRAUM = "5y"
+    kern.BLOCKGROESSE = BLOCK
+    kern.PAUSE_SEKUNDEN = PAUSE
+    return kern.lade_fortlaufend(symbole, bestand, lader=lader or kern.lade_block, jetzt_utc=jetzt_utc)
 
 
 def wechselkurse(lader=None):
@@ -149,55 +163,27 @@ def erwarteter_handelstag(region, jetzt_utc=None):
     return pd.Timestamp(tag)
 
 
-def lies_vorlauf(pfad, jetzt_utc=None):
-    """Liest die letzten Tage der Kursdatei des vorigen Laufs. Gibt {symbol: Tabelle} zurück,
-    leer, wenn die Datei fehlt oder nicht lesbar ist (dann läuft alles wie ohne Vorlauf)."""
-    if not pfad or not os.path.exists(pfad):
-        return {}
-    try:
-        alt = pd.read_csv(pfad, parse_dates=["datum"])
-    except Exception as fehler:
-        print(f"Vorlauf nicht lesbar: {fehler}", flush=True)
-        return {}
-    grenze = pd.Timestamp((jetzt_utc or datetime.now(timezone.utc)).date()) - pd.Timedelta(days=VORLAUF_TAGE)
-    alt = alt[alt["datum"] >= grenze]
-    return {symbol: teil.set_index("datum")[kern.SPALTEN].sort_index() for symbol, teil in alt.groupby("ticker")}
-
-
-def ergaenze_aus_vorlauf(kurse, vorlauf):
-    """Übernimmt Handelstage aus dem vorigen Lauf, die Yahoo jetzt nicht mehr liefert.
-    Hintergrund: Yahoo lässt die jüngste Tageskerze zu manchen Uhrzeiten wieder weg
-    (beobachtet am 19.11.2026 bei US-Werten um 3 Uhr deutscher Zeit).
-    Übernommen wird nur, wenn alte und neue Reihe am letzten gemeinsamen Tag übereinstimmen –
-    sonst liegt ein Split oder eine Korrektur dazwischen und die alten Zeilen passen nicht mehr.
-    Gibt (kurse, Zahl der ergänzten Werte) zurück."""
-    ergaenzt = 0
-    for symbol, neu in list(kurse.items()):
-        alt = vorlauf.get(symbol)
-        if alt is None or neu.empty:
-            continue
-        letzter = neu.index[-1]
-        mehr = alt[alt.index > letzter]
-        if mehr.empty or letzter not in alt.index:
-            continue
-        a, n = float(alt.loc[letzter, "close"]), float(neu["close"].iloc[-1])
-        if n <= 0 or abs(a / n - 1) > VORLAUF_TOLERANZ:
-            continue
-        kurse[symbol] = pd.concat([neu, mehr.astype(neu.dtypes.to_dict(), errors="ignore")])
-        ergaenzt += 1
-    return kurse, ergaenzt
-
-
 # ----------------------------------------------------------------------------
 # Arbeitsgang 1: wöchentliche Auslese
 # ----------------------------------------------------------------------------
-def auslese(region, universum, ausgabe, lader=None, jetzt_utc=None):
+def auslese(region, universum, ausgabe, lader=None, jetzt_utc=None, vorher=None):
     kandidaten = lies_universum(universum, region)
     print(f"Auslese {region}: {len(kandidaten)} Kandidaten", flush=True)
     fx = wechselkurse(lader)
-    kurse = lade([k["symbol"] for k in kandidaten], "3mo", lader=lader)
-    kurse = entferne_unfertige_tage(kurse, jetzt_utc)
     heute = pd.Timestamp((jetzt_utc or datetime.now(timezone.utc)).date())
+    # Werte mit frischem Bestand werden aus dem Bestand beurteilt – ohne Abruf bei Yahoo.
+    bestand = kern.lies_bestand(vorher)
+    kurse = {}
+    for k in kandidaten:
+        t = bestand.get(k["symbol"])
+        if t is not None and not t.empty and (heute - t.index[-1]).days <= MAX_ALTER_TAGE:
+            kurse[k["symbol"]] = t.iloc[-TAGE_AUSLESE:]
+    aus_bestand = len(kurse)
+    rest = [k["symbol"] for k in kandidaten if k["symbol"] not in kurse]
+    print(f"Aus dem Bestand: {aus_bestand} Werte · bei Yahoo zu laden: {len(rest)} Werte", flush=True)
+    if rest:
+        kurse.update(lade(rest, "3mo", lader=lader))
+    kurse = entferne_unfertige_tage(kurse, jetzt_utc)
 
     aktiv, gruende = [], {"keine Daten": 0, "veraltet": 0, "zu wenig Tage": 0, "Umsatz": 0, "Kurs": 0, "Währung": 0}
     for k in kandidaten:
@@ -227,6 +213,7 @@ def auslese(region, universum, ausgabe, lader=None, jetzt_utc=None):
         schreiber.writeheader(); schreiber.writerows(aktiv)
     bericht = {"region": region, "erstellt_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
                "kandidaten": len(kandidaten), "aktiv": len(aktiv), "ausgeschieden": gruende,
+               "aus_bestand_beurteilt": aus_bestand, "bei_yahoo_geladen": len(rest),
                "schwellen": {"umsatz_mio_eur": MIN_UMSATZ_MIO_EUR, "kurs_eur": MIN_KURS_EUR}, "wechselkurse": fx}
     with open(os.path.join(ausgabe, f"auslese_{region}.json"), "w", encoding="utf-8") as f:
         json.dump(bericht, f, ensure_ascii=False, indent=2)
@@ -238,16 +225,24 @@ def auslese(region, universum, ausgabe, lader=None, jetzt_utc=None):
 # ----------------------------------------------------------------------------
 # Arbeitsgang 2: tägliche Kurse und Kennzahlen
 # ----------------------------------------------------------------------------
-def kurse_region(region, liste, ausgabe, lader=None, jetzt_utc=None, vorher=None):
+def kurse_region(region, liste, ausgabe, lader=None, jetzt_utc=None, vorher=None, voll=False):
     werte = lies_universum(liste, region)
+    symbole = [w["symbol"] for w in werte]
     print(f"Kurse {region}: {len(werte)} Werte", flush=True)
     fx = wechselkurse(lader)
-    kurse = lade([w["symbol"] for w in werte], "5y", lader=lader)
-    # Tage, die Yahoo jetzt weglässt, aus dem vorigen Lauf übernehmen – danach erst
-    # die unfertigen Tageskerzen entfernen (die Regel gilt so auch für übernommene Zeilen).
-    kurse, ergaenzt = ergaenze_aus_vorlauf(kurse, lies_vorlauf(vorher, jetzt_utc))
-    if ergaenzt:
-        print(f"Aus dem vorigen Lauf ergänzt: {ergaenzt} Werte", flush=True)
+    # Fortlaufend laden: Bestand lesen, nur den letzten Monat holen, gezielt nachladen.
+    # Geht dabei irgendetwas schief, lädt das Skript wie früher alles voll.
+    bestand = {} if voll else kern.lies_bestand(vorher)
+    try:
+        kurse, abruf = lade_mit_bestand(symbole, bestand, lader=lader, jetzt_utc=jetzt_utc)
+        if voll:
+            abruf["art"] = "voll (erzwungen)"
+    except Exception as fehler:
+        print(f"Fortlaufendes Laden gescheitert ({fehler}) – lade alles voll.", flush=True)
+        kurse = lade(symbole, "5y", lader=lader)
+        abruf = {"art": "voll (Notweg nach Fehler)", "kurz_geladen": 0, "voll_nachgeladen": len(symbole)}
+    # Erst nach dem Zusammenführen die unfertigen Tageskerzen entfernen
+    # (die Regel gilt so auch für Zeilen aus dem Bestand).
     kurse = entferne_unfertige_tage(kurse, jetzt_utc)
 
     letzte = [t.index[-1] for t in kurse.values() if not t.empty]
@@ -293,7 +288,7 @@ def kurse_region(region, liste, ausgabe, lader=None, jetzt_utc=None, vorher=None
               # Prüfung für alle, die die Daten nutzen: Steht der erwartete Tag in den Daten?
               "erwarteter_handelstag": erwartet.strftime("%Y-%m-%d"),
               "stand_aktuell": bool(bezugstag is not None and bezugstag >= erwartet),
-              "aus_vorlauf_ergaenzt": ergaenzt,
+              "abruf": abruf,                       # wie geladen wurde (fortlaufend oder voll, Gründe fürs Nachladen)
               "werte_gesamt": len(werte), "werte_aktuell": aktuell, "werte_veraltet": len(veraltet),
               "veraltet_beispiele": sorted(veraltet)[:40], "fehlend": len(fehlend), "fehlend_beispiele": sorted(fehlend)[:40],
               "wechselkurse": fx, "quelle": "Yahoo Finance über yfinance",
@@ -317,15 +312,16 @@ def main(argumente=None, lader=None, jetzt_utc=None):
     p.add_argument("--region", choices=REGIONEN, required=True)
     p.add_argument("--universum", default="universum_global.csv", help="Kandidatenliste (für die Auslese)")
     p.add_argument("--aktiv", default=None, help="Liste der aktiven Werte (für die Kurse); fehlt sie, gilt die Kandidatenliste")
-    p.add_argument("--vorher", default=None, help="Kursdatei des vorigen Laufs (schützt vor Lücken bei Yahoo)")
+    p.add_argument("--vorher", default=None, help="Kursdatei des vorigen Laufs (Bestand) für das fortlaufende Laden")
+    p.add_argument("--voll", action="store_true", help="Bestand nicht nutzen, alles voll laden")
     p.add_argument("--out", default="out", help="Ausgabeordner")
     o = p.parse_args(argumente)
     if o.modus == "auslese":
-        return auslese(o.region, o.universum, o.out, lader=lader, jetzt_utc=jetzt_utc)
+        return auslese(o.region, o.universum, o.out, lader=lader, jetzt_utc=jetzt_utc, vorher=o.vorher)
     liste = o.aktiv if o.aktiv and os.path.exists(o.aktiv) else o.universum
     if liste == o.universum:
         print("Hinweis: keine Auslese vorhanden – lade die ganze Kandidatenliste der Region.", flush=True)
-    return kurse_region(o.region, liste, o.out, lader=lader, jetzt_utc=jetzt_utc, vorher=o.vorher)
+    return kurse_region(o.region, liste, o.out, lader=lader, jetzt_utc=jetzt_utc, vorher=o.vorher, voll=o.voll)
 
 
 if __name__ == "__main__":

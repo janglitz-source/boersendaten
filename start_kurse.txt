@@ -1,0 +1,7 @@
+# Startdatei für den Arbeitsablauf "Kurse laden" (Kerndatenbank).
+# Eine Änderung dieser Datei startet einen Lauf. Die erste Zeile ohne # nennt die Art:
+#   fortlaufend   normaler Lauf: Bestand nutzen, nur den letzten Monat laden
+#   voll          Bestand nicht nutzen, alles voll laden (nur zur Reparatur)
+# Die Zeile danach ist nur ein Vermerk, damit sich die Datei ändert.
+fortlaufend
+Start 1 am 19.11.2026: erster Lauf mit fortlaufendem Laden

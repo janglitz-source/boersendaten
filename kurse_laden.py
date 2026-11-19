@@ -5,10 +5,24 @@ kurse_laden.py – lädt Tageskurse für Jans Papierdepot und legt sie als Datei
 
 Was das Skript macht:
   1. Es liest die Tickerliste aus tickers.csv (Spalten: ticker, gruppe).
-  2. Es lädt für jeden Wert die Tageskurse der letzten fünf Jahre von Yahoo Finance
-     (über die Bibliothek yfinance): Eröffnung, Hoch, Tief, Schluss, Umsatz in Stück.
+  2. Es führt für jeden Wert fünf Jahre Tageskurse von Yahoo Finance (über die Bibliothek
+     yfinance): Eröffnung, Hoch, Tief, Schluss, Umsatz in Stück.
      Die Kurse sind um Aktiensplits bereinigt, aber NICHT um Dividenden – so passen
      sie zu den Kursen im Chart und zu den Vergleichskursen von ariva.
+     FORTLAUFENDES LADEN (seit 19.11.2026): Mit --vorher bekommt das Skript die Kursdatei
+     des vorigen Laufs (den Bestand). Dann holt es bei Yahoo nur noch den letzten Monat
+     und hängt die neuen Tage an den Bestand an. Voll nachgeladen (fünf Jahre) wird nur
+     gezielt ein einzelner Wert, wenn
+        - er neu in der Liste ist (kein Bestand),
+        - sein Bestand weniger als 250 Handelstage hat (junge Aktie oder Yahoo hatte die
+          Historie zeitweise gekappt – der volle Abruf ist dann ohnehin klein),
+        - Bestand und neuer Abruf keinen gemeinsamen Tag haben (lange Pause),
+        - die Kurse an den gemeinsamen Tagen nicht zusammenpassen (Split oder Korrektur
+          bei Yahoo – dann stimmt die alte Historie nicht mehr),
+        - der letzte Tag einen Kurssprung von mehr als 40 % zeigt (Gegenprobe).
+     LÜCKENREGEL: Lässt Yahoo den jüngsten Tag weg, den der Bestand schon hat, bleibt
+     dieser Tag aus dem Bestand erhalten.
+     Ohne Bestand (erster Lauf, Datei nicht lesbar) oder mit --voll lädt es alles voll.
   3. Es entfernt unfertige Tageskerzen (laufender Handelstag).
   4. Es rechnet je Wert die Kennzahlen für den Grobfilter (Durchschnitte, RSI, ATR,
      52-Wochen-Marken, Renditen) – immer mit derselben Formel.
@@ -21,16 +35,17 @@ Was das Skript macht:
      Skript mit einem Fehler.
      Dann veröffentlicht der Arbeitsablauf nichts, und der alte Stand bleibt stehen.
 
-Aufruf:  python kurse_laden.py --tickers tickers.csv --out out
+Aufruf:  python kurse_laden.py --tickers tickers.csv --out out --vorher vorher/kurse.csv.gz
 """
 
 import argparse
 import csv
 import gzip
 import json
+import os
 import sys
 import time
-from datetime import datetime, time as uhrzeit, timezone
+from datetime import datetime, time as uhrzeit, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -38,8 +53,14 @@ import pandas as pd
 # ----------------------------------------------------------------------------
 # Einstellungen
 # ----------------------------------------------------------------------------
-ZEITRAUM = "5y"          # so viel Kurshistorie wird geladen (rund 1.250 Handelstage,
+ZEITRAUM = "5y"          # so viel Kurshistorie wird geführt (rund 1.250 Handelstage,
                          # genug für 60 Monatskerzen in der Chartanalyse)
+KURZ_ZEITRAUM = "1mo"    # so viel wird täglich bei Yahoo geholt, wenn ein Bestand da ist
+JAHRE_BESTAND = 5        # ältere Tage fallen aus dem Bestand heraus (die Datei wächst nicht)
+TOLERANZ = 0.005         # Bestand und neuer Abruf müssen an gemeinsamen Tagen auf 0,5 % passen
+PRUEFTAGE = 5            # so viele (älteste) gemeinsame Tage werden verglichen
+SPRUNG = 0.40            # Tagesveränderung, ab der ein Wert zur Gegenprobe voll nachgeladen wird
+MIN_TAGE_BESTAND = 250   # Werte mit kürzerem Bestand werden jedes Mal voll geladen (kleiner Abruf)
 BLOCKGROESSE = 50        # so viele Werte je Abruf bei Yahoo
 PAUSE_SEKUNDEN = 3       # Pause zwischen zwei Blöcken (schont die Quelle)
 VERSUCHE = 3             # so oft wird ein gescheiterter Block wiederholt
@@ -155,6 +176,143 @@ def lade_alle(symbole, lader=lade_block):
 
 
 # ----------------------------------------------------------------------------
+# 2b. Fortlaufendes Laden: Bestand lesen, nur Neues holen, gezielt nachladen
+# ----------------------------------------------------------------------------
+def lies_bestand(pfad):
+    """Liest die Kursdatei des vorigen Laufs. Gibt {ticker: Tabelle} zurück – leer,
+    wenn die Datei fehlt oder nicht lesbar ist (dann wird alles voll geladen)."""
+    if not pfad or not os.path.exists(pfad):
+        return {}
+    try:
+        alt = pd.read_csv(pfad, parse_dates=["datum"], dtype={"ticker": str})
+        alt = alt.dropna(subset=["close"])
+        return {ticker: teil.set_index("datum")[SPALTEN].sort_index() for ticker, teil in alt.groupby("ticker")}
+    except Exception as fehler:
+        print(f"Bestand nicht lesbar ({fehler}) – es wird alles voll geladen.", flush=True)
+        return {}
+
+
+def haenge_neuere_an(neu, alt):
+    """LÜCKENREGEL: Hängt Tage aus dem Bestand an, die jünger sind als der letzte Tag des
+    neuen Abrufs – aber nur, wenn beide Reihen am letzten Tag des neuen Abrufs auf 0,5 %
+    übereinstimmen (sonst liegt ein Split oder eine Korrektur dazwischen).
+    Gibt (Tabelle, True/False ob etwas angehängt wurde) zurück."""
+    if alt is None or alt.empty or neu.empty:
+        return neu, False
+    letzter = neu.index[-1]
+    mehr = alt[alt.index > letzter]
+    if mehr.empty or letzter not in alt.index:
+        return neu, False
+    a, n = float(alt.loc[letzter, "close"]), float(neu["close"].iloc[-1])
+    if n <= 0 or abs(a / n - 1) > TOLERANZ:
+        return neu, False
+    return pd.concat([neu, mehr]), True
+
+
+def fuege_zusammen(alt, neu):
+    """Verbindet den Bestand eines Werts mit dem kurzen neuen Abruf.
+    Gibt (Tabelle, Grund, ergänzt) zurück. Grund ist None, wenn alles passt; sonst steht
+    dort, warum der Wert voll nachgeladen werden soll."""
+    gemeinsam = alt.index.intersection(neu.index)
+    if len(gemeinsam) == 0:
+        return alt, "keine Überlappung", False
+    # Vergleich an den ältesten gemeinsamen Tagen: Dort ändert Yahoo nachträglich nur bei
+    # Split oder Korrektur. Jüngere Tage dürfen sich noch leicht ändern – da gilt der neue Abruf.
+    pruef = gemeinsam[:PRUEFTAGE]
+    a, n = alt.loc[pruef, "close"].astype(float), neu.loc[pruef, "close"].astype(float)
+    if ((a / n - 1).abs() > TOLERANZ).any():
+        return alt, "Abweichung zum Bestand", False
+    davor = alt[alt.index < neu.index[0]]          # alte Historie vor dem neuen Abruf
+    danach = alt[alt.index > neu.index[-1]]        # Lückenregel: Tage, die Yahoo jetzt weglässt
+    tabelle = pd.concat([davor, neu, danach])
+    if len(tabelle) >= 2:
+        vortag, letzter = float(tabelle["close"].iloc[-2]), float(tabelle["close"].iloc[-1])
+        if vortag > 0 and abs(letzter / vortag - 1) > SPRUNG:
+            return tabelle, "Kurssprung", not danach.empty
+    return tabelle, None, not danach.empty
+
+
+def lade_fortlaufend(symbole, bestand, lader=lade_block, jetzt_utc=None):
+    """Lädt mit Bestand nur den letzten Monat und gezielt einzelne Werte voll nach.
+    Gibt (kurse, bericht) zurück. Ohne Bestand wird alles voll geladen."""
+    global ZEITRAUM
+    lang = ZEITRAUM
+    heute = pd.Timestamp((jetzt_utc or datetime.now(timezone.utc)).date())
+    grenze = heute - pd.DateOffset(years=JAHRE_BESTAND)
+
+    # Werte mit ausreichend langem Bestand bekommen nur den kurzen Abruf.
+    mit = [s for s in symbole if s in bestand and len(bestand[s]) >= MIN_TAGE_BESTAND]
+    nachladen = {s: ("kurze Historie" if s in bestand and not bestand[s].empty else "neu in der Liste")
+                 for s in symbole if s not in mit}                         # Wert -> Grund
+    kurse, ergaenzt, ohne_antwort = {}, [], []
+
+    # 1) kurzer Abruf für alle Werte mit Bestand
+    frisch = {}
+    if mit:
+        print(f"Kurzer Abruf ({KURZ_ZEITRAUM}) für {len(mit)} Werte mit Bestand", flush=True)
+        ZEITRAUM = KURZ_ZEITRAUM
+        try:
+            frisch = lade_alle(mit, lader=lader)
+        finally:
+            ZEITRAUM = lang
+    for s in mit:
+        neu = frisch.get(s)
+        if neu is None or neu.empty:               # Yahoo hat nichts geliefert: Bestand bleibt stehen
+            kurse[s] = bestand[s]; ohne_antwort.append(s); continue
+        tabelle, grund, hat_ergaenzt = fuege_zusammen(bestand[s], neu)
+        kurse[s] = tabelle                         # gilt, falls das Nachladen scheitert
+        if grund:
+            nachladen[s] = grund
+        elif hat_ergaenzt:
+            ergaenzt.append(s)
+
+    # 2) gezieltes volles Nachladen nur der auffälligen und der neuen Werte
+    gescheitert = []
+    if nachladen:
+        print(f"Volles Nachladen ({lang}) für {len(nachladen)} Werte", flush=True)
+        voll = lade_alle(list(nachladen), lader=lader)
+        for s in nachladen:
+            t = voll.get(s)
+            if t is None or t.empty:
+                gescheitert.append(s); continue    # alter Stand bleibt (oder der Wert fehlt)
+            kurse[s], hat_ergaenzt = haenge_neuere_an(t, bestand.get(s))
+            if hat_ergaenzt:
+                ergaenzt.append(s)
+
+    # 3) Bestand auf fünf Jahre begrenzen
+    for s, t in list(kurse.items()):
+        kurse[s] = t[t.index >= grenze]
+
+    gruende = {}
+    for grund in nachladen.values():
+        gruende[grund] = gruende.get(grund, 0) + 1
+    bericht = {
+        "art": "fortlaufend" if mit else "voll (kein Bestand)",
+        "kurz_geladen": len(mit),                  # nur der letzte Monat
+        "voll_nachgeladen": len(nachladen),        # fünf Jahre, gezielt
+        "gruende": gruende,
+        "nachgeladen_beispiele": sorted(s for s, g in nachladen.items()
+                                        if g not in ("neu in der Liste", "kurze Historie"))[:40],
+        "nachladen_gescheitert": sorted(gescheitert)[:40],
+        "aus_bestand_ergaenzt": len(ergaenzt),     # Lückenregel hat gegriffen
+        "ohne_antwort": len(ohne_antwort),         # Yahoo lieferte nichts, Bestand blieb stehen
+    }
+    return kurse, bericht
+
+
+def erwarteter_us_handelstag(jetzt_utc=None):
+    """Letzter Wochentag, an dem die US-Börse schon geschlossen hat (16:20 Uhr New York).
+    Feiertage kennt die Funktion nicht – an und nach US-Feiertagen nennt sie einen Tag zu viel."""
+    jetzt_ny = (jetzt_utc or datetime.now(timezone.utc)).astimezone(ZoneInfo("America/New_York"))
+    tag = jetzt_ny.date()
+    if jetzt_ny.weekday() >= 5 or jetzt_ny.time() < uhrzeit(16, 20):
+        tag -= timedelta(days=1)
+    while tag.weekday() >= 5:
+        tag -= timedelta(days=1)
+    return pd.Timestamp(tag)
+
+
+# ----------------------------------------------------------------------------
 # 3. Unfertige Tageskerzen entfernen
 # ----------------------------------------------------------------------------
 def entferne_unfertige_tage(kurse, gruppen, jetzt_utc=None):
@@ -263,10 +421,9 @@ def kennzahlen_fuer(tabelle):
 # ----------------------------------------------------------------------------
 # 5. Dateien schreiben
 # ----------------------------------------------------------------------------
-def schreibe_dateien(kurse, tickers, bezugstag, ausgabe, quelle):
+def schreibe_dateien(kurse, tickers, bezugstag, ausgabe, quelle, abruf=None, erwartet=None):
     """Schreibt kurse.csv.gz, kennzahlen.csv, letzte_kurse.csv und status.json.
     Gibt den Status als Wörterbuch zurück."""
-    import os
     os.makedirs(ausgabe, exist_ok=True)
 
     aktuell, veraltet, fehlend = [], [], []
@@ -312,6 +469,9 @@ def schreibe_dateien(kurse, tickers, bezugstag, ausgabe, quelle):
     status = {
         "erstellt_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
         "letzter_handelstag": bezugstag.strftime("%Y-%m-%d") if bezugstag is not None else None,
+        # Prüfung: Steht der erwartete US-Handelstag in den Daten? (false: US-Feiertag oder Lücke bei Yahoo)
+        "erwarteter_handelstag": erwartet.strftime("%Y-%m-%d") if erwartet is not None else None,
+        "stand_aktuell": bool(bezugstag is not None and erwartet is not None and bezugstag >= erwartet),
         "aktien_gesamt": len(kern),                           # Watchlist und Midcaps
         "aktien_aktuell": len(aktuell) - zusatz_aktuell,
         "zusatz_gesamt": len(zusatz),                         # übrige Aktien (z. B. Gruppe SP500)
@@ -320,6 +480,7 @@ def schreibe_dateien(kurse, tickers, bezugstag, ausgabe, quelle):
         "fehlend": sorted(fehlend),
         "werte_in_datei": len(kennzahlen),
         "zeitraum": ZEITRAUM,
+        "abruf": abruf or {},                                 # wie geladen wurde (fortlaufend oder voll)
         "quelle": quelle,
         "hinweis": "Kurse um Splits bereinigt, nicht um Dividenden. RSI und ATR nach Wilder.",
     }
@@ -335,6 +496,8 @@ def main(argumente=None, lader=lade_block, jetzt_utc=None):
     parser = argparse.ArgumentParser(description="Tageskurse laden und als Dateien ablegen")
     parser.add_argument("--tickers", default="tickers.csv", help="Datei mit der Tickerliste")
     parser.add_argument("--out", default="out", help="Ausgabeordner")
+    parser.add_argument("--vorher", default=None, help="Kursdatei des vorigen Laufs (Bestand) für das fortlaufende Laden")
+    parser.add_argument("--voll", action="store_true", help="Bestand nicht nutzen, alles voll laden")
     optionen = parser.parse_args(argumente)
 
     tickers = lies_tickers(optionen.tickers)
@@ -342,7 +505,17 @@ def main(argumente=None, lader=lade_block, jetzt_utc=None):
     symbole = list(gruppen.keys())
     print(f"{len(symbole)} Werte in der Liste", flush=True)
 
-    kurse = lade_alle(symbole, lader=lader)
+    # Bestand lesen (Schlüssel = Yahoo-Schreibweise, z. B. BRK-B) und fortlaufend laden.
+    # Geht dabei irgendetwas schief, lädt das Skript wie früher alles voll.
+    bestand = {} if optionen.voll else {yahoo_symbol(t): tab for t, tab in lies_bestand(optionen.vorher).items()}
+    try:
+        kurse, abruf = lade_fortlaufend(symbole, bestand, lader=lader, jetzt_utc=jetzt_utc)
+        if optionen.voll:
+            abruf["art"] = "voll (erzwungen)"
+    except Exception as fehler:
+        print(f"Fortlaufendes Laden gescheitert ({fehler}) – lade alles voll.", flush=True)
+        kurse = lade_alle(symbole, lader=lader)
+        abruf = {"art": "voll (Notweg nach Fehler)", "kurz_geladen": 0, "voll_nachgeladen": len(symbole)}
     bezugstag = entferne_unfertige_tage(kurse, gruppen, jetzt_utc=jetzt_utc)
 
     try:
@@ -351,7 +524,8 @@ def main(argumente=None, lader=lade_block, jetzt_utc=None):
     except Exception:
         quelle = "Yahoo Finance über yfinance"
 
-    status = schreibe_dateien(kurse, tickers, bezugstag, optionen.out, quelle)
+    status = schreibe_dateien(kurse, tickers, bezugstag, optionen.out, quelle,
+                              abruf=abruf, erwartet=erwarteter_us_handelstag(jetzt_utc))
     print(json.dumps({k: v for k, v in status.items() if k != "hinweis"}, ensure_ascii=False), flush=True)
 
     # Abbruch, wenn zu wenige Listenwerte aktuell sind – dann wird nichts veröffentlicht.

@@ -1,4 +1,7 @@
 # Arbeitsablauf "Kurse laden": holt die Tageskurse und legt sie im Zweig "daten" ab.
+# Seit 19.11.2026 fortlaufend: Der Lauf holt die Kursdatei des vorigen Laufs (den Bestand),
+# lädt bei Yahoo nur den letzten Monat und hängt die neuen Tage an. Voll nachgeladen wird
+# nur gezielt ein einzelner Wert (Regeln in kurse_laden.py, Abschnitt 2b).
 name: Kurse laden
 
 on:
@@ -7,6 +10,9 @@ on:
     - cron: "37 22 * * 1-5"   # Montag bis Freitag abends
     # Zweiter Lauf am frühen Morgen als Sicherheit, vor dem Review (6:37) und dem Scan (Sa 7:43).
     - cron: "17 4 * * 2-6"    # Dienstag bis Samstag 04:17 UTC = 05:17 Uhr
+  push:
+    paths:
+      - "start_kurse.txt"     # Start durch eine Änderung dieser Datei (so startet Claude einen Lauf)
   workflow_dispatch: {}       # Knopf "Run workflow" zum Starten von Hand
 
 permissions:
@@ -32,8 +38,27 @@ jobs:
       - name: Bibliotheken installieren
         run: pip install --quiet "yfinance==1.8.0" pandas   # feste Version, die am 18.11.2026 geprüft wurde
 
+      # Bestand = Kursdatei des vorigen Laufs aus dem Zweig "daten". Fehlt sie oder ist sie
+      # nicht lesbar, lädt das Skript wie früher alles voll.
+      - name: Bestand holen
+        run: |
+          mkdir -p vorher
+          if git fetch -q --depth 1 origin daten 2>/dev/null; then
+            git show FETCH_HEAD:kurse.csv.gz > vorher/kurse.csv.gz || rm -f vorher/kurse.csv.gz
+          else
+            echo "Kein Bestand gefunden – es wird alles voll geladen."
+          fi
+          ls -l vorher
+
       - name: Kurse laden und Kennzahlen rechnen
-        run: python kurse_laden.py --tickers tickers.csv --out out
+        env:
+          EREIGNIS: ${{ github.event_name }}
+        run: |
+          # Steht in start_kurse.txt als erste Zeile ohne # das Wort "voll", wird der Bestand
+          # nicht genutzt und alles voll geladen (nur zur Reparatur).
+          ZUSATZ=""
+          if [ "$EREIGNIS" = "push" ] && [ "$(grep -v '^#' start_kurse.txt | head -1 | awk '{print $1}')" = "voll" ]; then ZUSATZ="--voll"; fi
+          python kurse_laden.py --tickers tickers.csv --out out --vorher vorher/kurse.csv.gz $ZUSATZ
 
       # Die Daten kommen in den Zweig "daten" – jedes Mal als ein einziger frischer Stand,
       # damit das Repository nicht mit alten Kursdateien anwächst.

@@ -1,5 +1,9 @@
 # Arbeitsablauf "Global laden": globale Kursdatenbank je Region (Heimatbörsen).
 # Unabhängig vom Ablauf "Kurse laden" (Kernlisten) – fällt dieser hier aus, läuft der Kern weiter.
+# Seit 19.11.2026 fortlaufend: Jeder Lauf holt die Kursdatei des vorigen Laufs (den Bestand),
+# lädt bei Yahoo nur den letzten Monat und hängt die neuen Tage an. Voll nachgeladen wird nur
+# gezielt ein einzelner Wert. Auch die Auslese am Samstag rechnet aus dem Bestand und lädt nur
+# die Kandidaten, die nicht im Bestand stehen.
 name: Global laden
 
 on:
@@ -12,7 +16,7 @@ on:
     # (19.11.2026) ließ Yahoo bei den meisten Werten die jüngste Tageskerze weg; abends
     # um 22:30 und 0:25 Uhr war sie vollständig da.
     - cron: "7 22 * * 1-5"     # USA-Zusatzwerte (23:07 Uhr)
-    # Wöchentliche Auslese der handelbaren Werte, samstags verteilt:
+    # Wöchentliche Auslese der handelbaren Werte, samstags verteilt (kein Komplettabruf):
     - cron: "17 9 * * 6"       # Asien/Pazifik
     - cron: "17 10 * * 6"      # Europa
     - cron: "17 11 * * 6"      # Kanada
@@ -69,11 +73,13 @@ jobs:
           ZEITPLAN: ${{ github.event.schedule }}
           EREIGNIS: ${{ github.event_name }}
         run: |
-          MODUS="$EINGABE_MODUS"; REGION="$EINGABE_REGION"
+          MODUS="$EINGABE_MODUS"; REGION="$EINGABE_REGION"; ZUSATZ=""
           # Start über die Startdatei: erste Zeile ohne # nennt Arbeitsgang und Region
           if [ "$EREIGNIS" = "push" ]; then
             ZEILE=$(grep -v '^#' start_global.txt | head -1)
             MODUS=$(echo "$ZEILE" | awk '{print $1}'); REGION=$(echo "$ZEILE" | awk '{print $2}')
+            # drittes Wort "voll": Bestand nicht nutzen, alles voll laden (nur zur Reparatur)
+            if [ "$(echo "$ZEILE" | awk '{print $3}')" = "voll" ]; then ZUSATZ="--voll"; fi
           fi
           case "$ZEITPLAN" in
             "47 7 * * 1-5")  MODUS=kurse;   REGION=asien ;;
@@ -90,8 +96,8 @@ jobs:
           case "$MODUS" in auslese|kurse|beides) ;; *) echo "Unbekannter Arbeitsgang: $MODUS"; exit 1 ;; esac
           case "$REGION" in asien|europa|kanada|usa|alle) ;; *) echo "Unbekannte Region: $REGION"; exit 1 ;; esac
           if [ "$REGION" = "alle" ]; then REGION="asien europa kanada usa"; fi
-          echo "modus=$MODUS" >> "$GITHUB_OUTPUT"; echo "regionen=$REGION" >> "$GITHUB_OUTPUT"
-          echo "Arbeitsgang: $MODUS · Regionen: $REGION"
+          echo "modus=$MODUS" >> "$GITHUB_OUTPUT"; echo "regionen=$REGION" >> "$GITHUB_OUTPUT"; echo "zusatz=$ZUSATZ" >> "$GITHUB_OUTPUT"
+          echo "Arbeitsgang: $MODUS · Regionen: $REGION · Zusatz: ${ZUSATZ:-keiner}"
 
       # Jede Region wird für sich bearbeitet und sofort abgelegt. Scheitert eine Region,
       # laufen die übrigen weiter; am Ende meldet der Ablauf den Fehler.
@@ -99,13 +105,16 @@ jobs:
         env:
           MODUS: ${{ steps.plan.outputs.modus }}
           REGIONEN: ${{ steps.plan.outputs.regionen }}
+          ZUSATZ: ${{ steps.plan.outputs.zusatz }}
         run: |
           FEHLER=0
           for REGION in $REGIONEN; do
-            rm -rf out && mkdir -p out
+            rm -rf out vorher && mkdir -p out vorher
+            # Bestand = Kursdatei des vorigen Laufs. Fehlt sie, lädt das Skript alles voll.
+            gh release download "$ABLAGE" -p "kurse_$REGION.csv.gz" -D vorher 2>/dev/null || echo "Kein Bestand für $REGION."
             if [ "$MODUS" != "kurse" ]; then
               echo "::group::Auslese $REGION"
-              if python global_laden.py --modus auslese --region "$REGION" --out out; then
+              if python global_laden.py --modus auslese --region "$REGION" --out out --vorher vorher/kurse_$REGION.csv.gz; then
                 gh release upload "$ABLAGE" out/aktiv_$REGION.csv out/auslese_$REGION.json --clobber
               else
                 echo "Auslese $REGION gescheitert – die alte Liste bleibt stehen."; FEHLER=1
@@ -116,11 +125,7 @@ jobs:
               echo "::group::Kurse $REGION"
               # aktuelle Liste der aktiven Werte aus der Ablage holen (fehlt sie, lädt das Skript alle Kandidaten)
               [ -f out/aktiv_$REGION.csv ] || gh release download "$ABLAGE" -p "aktiv_$REGION.csv" -D out 2>/dev/null || true
-              # Kursdatei des vorigen Laufs holen: Lässt Yahoo einen Tag weg, den der letzte Lauf
-              # schon hatte, übernimmt das Skript ihn von dort (fehlt die Datei, läuft es ohne).
-              rm -rf vorher && mkdir -p vorher
-              gh release download "$ABLAGE" -p "kurse_$REGION.csv.gz" -D vorher 2>/dev/null || true
-              if python global_laden.py --modus kurse --region "$REGION" --out out --aktiv out/aktiv_$REGION.csv --vorher vorher/kurse_$REGION.csv.gz; then
+              if python global_laden.py --modus kurse --region "$REGION" --out out --aktiv out/aktiv_$REGION.csv --vorher vorher/kurse_$REGION.csv.gz $ZUSATZ; then
                 gh release upload "$ABLAGE" out/kurse_$REGION.csv.gz out/kennzahlen_$REGION.csv out/status_$REGION.json --clobber
               else
                 echo "Kurse $REGION gescheitert – der alte Stand bleibt stehen."; FEHLER=1
