@@ -1,0 +1,4 @@
+# Zwischendateien von Python und Ausgabeordner der Läufe gehören nicht ins Repository
+__pycache__/
+out/
+vorher/
