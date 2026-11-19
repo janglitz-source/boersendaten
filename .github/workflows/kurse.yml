@@ -40,11 +40,14 @@ jobs:
 
       # Bestand = Kursdatei des vorigen Laufs aus dem Zweig "daten". Fehlt sie oder ist sie
       # nicht lesbar, lädt das Skript wie früher alles voll.
+      # Der Zweig wird in einen eigenen Ordner außerhalb des Arbeitsordners geholt, damit
+      # das Repository des Laufs unberührt bleibt.
       - name: Bestand holen
         run: |
           mkdir -p vorher
-          if git fetch -q --depth 1 origin daten 2>/dev/null; then
-            git show FETCH_HEAD:kurse.csv.gz > vorher/kurse.csv.gz || rm -f vorher/kurse.csv.gz
+          if git clone -q --depth 1 --branch daten "https://github.com/${{ github.repository }}.git" "$RUNNER_TEMP/bestand" 2>/dev/null \
+             && [ -f "$RUNNER_TEMP/bestand/kurse.csv.gz" ]; then
+            cp "$RUNNER_TEMP/bestand/kurse.csv.gz" vorher/kurse.csv.gz
           else
             echo "Kein Bestand gefunden – es wird alles voll geladen."
           fi
@@ -81,4 +84,12 @@ jobs:
           git config user.email "kurse-bot@users.noreply.github.com"
           git add status.json
           git commit -q -m "Status $(date -u '+%Y-%m-%d %H:%M') UTC" || echo "Status unverändert"
-          git push -q
+          # Die Kursdaten sind an dieser Stelle schon veröffentlicht. Scheitert das Ablegen der
+          # Statusdatei (am 19.11.2026 lehnte GitHub es einmal ab), wird es zweimal wiederholt;
+          # klappt es dann nicht, gibt es nur eine Warnung – der Lauf gilt trotzdem als gelungen.
+          for VERSUCH in 1 2 3; do
+            if git push -q; then exit 0; fi
+            echo "Ablegen gescheitert (Versuch $VERSUCH)"; sleep 15
+            git pull -q --rebase || true
+          done
+          echo "::warning::Statusdatei konnte nicht im Hauptzweig abgelegt werden. Die Kursdaten sind veröffentlicht."

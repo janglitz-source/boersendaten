@@ -4,4 +4,4 @@
 #   voll          Bestand nicht nutzen, alles voll laden (nur zur Reparatur)
 # Die Zeile danach ist nur ein Vermerk, damit sich die Datei ändert.
 fortlaufend
-Start 1 am 19.11.2026: erster Lauf mit fortlaufendem Laden
+Start 2 am 19.11.2026: zweiter Lauf mit fortlaufendem Laden (Bestand stammt jetzt aus Lauf 1)
