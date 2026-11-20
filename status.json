@@ -1,6 +1,6 @@
 {
-  "erstellt_utc": "2026-11-19 23:18",
-  "erstellt_berlin": "2026-11-20 00:18",
+  "erstellt_utc": "2026-11-20 05:20",
+  "erstellt_berlin": "2026-11-20 06:20",
   "letzter_handelstag": "2026-11-19",
   "erwarteter_handelstag": "2026-11-19",
   "stand_aktuell": true,
@@ -21,7 +21,7 @@
     },
     "nachgeladen_beispiele": [],
     "nachladen_gescheitert": [],
-    "aus_bestand_ergaenzt": 0,
+    "aus_bestand_ergaenzt": 192,
     "ohne_antwort": 0
   },
   "quelle": "Yahoo Finance über yfinance 1.8.0",
