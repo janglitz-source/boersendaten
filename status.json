@@ -1,8 +1,8 @@
 {
-  "erstellt_utc": "2026-11-21 05:12",
-  "erstellt_berlin": "2026-11-21 06:12",
-  "letzter_handelstag": "2026-11-20",
-  "erwarteter_handelstag": "2026-11-20",
+  "erstellt_utc": "2026-11-23 23:27",
+  "erstellt_berlin": "2026-11-24 00:27",
+  "letzter_handelstag": "2026-11-23",
+  "erwarteter_handelstag": "2026-11-23",
   "stand_aktuell": true,
   "aktien_gesamt": 612,
   "aktien_aktuell": 612,
@@ -21,7 +21,7 @@
     },
     "nachgeladen_beispiele": [],
     "nachladen_gescheitert": [],
-    "aus_bestand_ergaenzt": 1,
+    "aus_bestand_ergaenzt": 0,
     "ohne_antwort": 0
   },
   "quelle": "Yahoo Finance über yfinance 1.8.0",
