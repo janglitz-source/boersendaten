@@ -1,9 +1,9 @@
 {
-  "erstellt_utc": "2026-11-26 05:28",
-  "erstellt_berlin": "2026-11-26 06:28",
+  "erstellt_utc": "2026-11-26 23:29",
+  "erstellt_berlin": "2026-11-27 00:29",
   "letzter_handelstag": "2026-11-25",
-  "erwarteter_handelstag": "2026-11-25",
-  "stand_aktuell": true,
+  "erwarteter_handelstag": "2026-11-26",
+  "stand_aktuell": false,
   "aktien_gesamt": 612,
   "aktien_aktuell": 612,
   "zusatz_gesamt": 346,
