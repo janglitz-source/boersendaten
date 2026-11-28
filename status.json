@@ -1,0 +1,29 @@
+{
+  "erstellt_utc": "2026-11-28 05:19",
+  "erstellt_berlin": "2026-11-28 06:19",
+  "letzter_handelstag": "2026-11-27",
+  "erwarteter_handelstag": "2026-11-27",
+  "stand_aktuell": true,
+  "aktien_gesamt": 612,
+  "aktien_aktuell": 612,
+  "zusatz_gesamt": 346,
+  "zusatz_aktuell": 346,
+  "aktien_veraltet": [],
+  "fehlend": [],
+  "werte_in_datei": 990,
+  "zeitraum": "5y",
+  "abruf": {
+    "art": "fortlaufend",
+    "kurz_geladen": 987,
+    "voll_nachgeladen": 3,
+    "gruende": {
+      "kurze Historie": 3
+    },
+    "nachgeladen_beispiele": [],
+    "nachladen_gescheitert": [],
+    "aus_bestand_ergaenzt": 1,
+    "ohne_antwort": 0
+  },
+  "quelle": "Yahoo Finance über yfinance 1.8.0",
+  "hinweis": "Kurse um Splits bereinigt, nicht um Dividenden. RSI und ATR nach Wilder."
+}
